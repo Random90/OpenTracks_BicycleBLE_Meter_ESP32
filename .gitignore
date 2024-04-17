@@ -50,3 +50,16 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# PlatformIO
+build/
+sdkconfig
+sdkconfig.old
+.vscode/
+.vscode/settings.json
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+sdkconfig.esp32dev
+sdkconfig.dfrobot_beetle_esp32c3.old
+sdkconfig.dfrobot_beetle_esp32c3
+
