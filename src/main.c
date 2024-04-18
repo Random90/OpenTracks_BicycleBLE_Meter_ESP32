@@ -1,8 +1,9 @@
 #include <stdio.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "OTDS Main";
@@ -11,25 +12,23 @@ static const char *TAG = "OTDS Main";
 
 static uint8_t s_led_state = 0;
 
-static void blink_led(void)
-{
-    gpio_set_level(BLINK_GPIO, s_led_state);
+static void blinkLed(void) { gpio_set_level(BLINK_GPIO, s_led_state); }
+
+static void configureLed(void) {
+  gpio_reset_pin(BLINK_GPIO);
+  gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
 }
 
-static void configure_led(void)
-{
-    gpio_reset_pin(BLINK_GPIO);
-    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
+static void startBlinkLoop() {
+  while (1) {
+    ESP_LOGI(TAG, "Turning the LED %s!", s_led_state == true ? "ON" : "OFF");
+    blinkLed();
+    s_led_state = !s_led_state;
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
 }
 
-void app_main(void)
-{
-    configure_led();
-
-    while (1) {
-        ESP_LOGI(TAG, "Turning the LED %s!", s_led_state == true ? "ON" : "OFF");
-        blink_led();
-        s_led_state = !s_led_state;
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
+void app_main(void) {
+  configureLed();
+  startBlinkLoop();
 }
