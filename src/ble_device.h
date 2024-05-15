@@ -8,8 +8,8 @@
 extern "C" {
 #endif
 
-// #define GATT_MANUFACTURER_NAME_UUID             0x2A29
-// #define GATT_MODEL_NUMBER_UUID                  0x2A24
+#define GATT_MANUFACTURER_NAME_UUID 0x2A29
+#define GATT_MODEL_NUMBER_UUID 0x2A24
 
 #define GATT_UUID 0x1816
 #define GATT_MEASUREMENT_INTERVAL_UUID 0x2A21
@@ -23,8 +23,8 @@ extern uint16_t attributeHandle;
 struct ble_hs_cfg;
 struct ble_gatt_register_ctxt;
 
-void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg);
-int gatt_svr_init(void);
+void gattServerRegisterCallback(struct ble_gatt_register_ctxt *ctxt, void *arg);
+int initializeGattServer(void);
 
 #ifdef __cplusplus
 }

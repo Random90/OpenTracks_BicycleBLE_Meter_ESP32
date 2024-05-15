@@ -9,7 +9,13 @@
 		"files.associations": {
 			"stdio.h": "c",
 			"console.h": "c",
-			"ble_svc_gap.h": "c"
+			"ble_svc_gap.h": "c",
+			"nimble_port_freertos.h": "c",
+			"gpio.h": "c",
+			"ble_svc_gatt.h": "c",
+			"ble.h": "c",
+			"modlog.h": "c",
+			"esp_log.h": "c"
 		}
 	}
 }
