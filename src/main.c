@@ -248,7 +248,6 @@ static void initBle() {
   assert(returnCode == 0);
 
   returnCode = ble_svc_gap_device_name_set(deviceName);
-  ESP_LOGW(TAG, "Device Name Set RC: %d", returnCode);
   assert(returnCode == 0);
 
   nimble_port_freertos_init(bleHostTask);
