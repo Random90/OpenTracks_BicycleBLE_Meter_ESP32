@@ -19,7 +19,7 @@ static int onGattAccess(uint16_t conn_handle, uint16_t attr_handle,
 static int onGattDeviceInfo(uint16_t conn_handle, uint16_t attr_handle,
                             struct ble_gatt_access_ctxt *ctxt, void *arg);
 
-// TODO proper service for openTracks (its not recognized now)
+// TODO proper services for openTracks (its not recognized now, but it should)
 static const struct ble_gatt_svc_def gattServices[] = {
     {/* Service: Cycling Speed and Cadence service */
      .type = BLE_GATT_SVC_TYPE_PRIMARY,
