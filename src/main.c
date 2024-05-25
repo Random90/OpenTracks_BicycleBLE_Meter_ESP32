@@ -185,7 +185,7 @@ static void onReset(int reason) {
 /* TODO prepare real data */
 static void bleNotify(TimerHandle_t ev) {
   /* [wheelRevolutionsCount (UINT32), wheelRevolutionsTime (UINT16; 1/1024s) */
-  static uint8_t data[2];
+  static uint16_t data[2];
   int returnCode;
   struct os_mbuf *buffer;
 
