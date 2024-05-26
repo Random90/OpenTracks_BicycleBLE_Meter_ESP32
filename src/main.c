@@ -185,7 +185,7 @@ static void onReset(int reason) {
 /* TODO prepare real data */
 static void bleNotify(TimerHandle_t ev) {
   /* [wheelRevolutionsCount (UINT32), wheelRevolutionsTime (UINT16; 1/1024s) */
-  static uint16_t data[2];
+  static uint8_t data[7];
   int returnCode;
   struct os_mbuf *buffer;
 
@@ -200,7 +200,17 @@ static void bleNotify(TimerHandle_t ev) {
   data[1] = wheelRevolutionsTime;
 
   wheelRevolutionsCount++;
-  wheelRevolutionsTime += 100;
+  wheelRevolutionsTime += 1024; // increment by 1s
+
+  data[0] =
+      0x01; // Flags: wheel revolution data present, crank revolution data not present
+  // divide 32bit revolutions count into 4 octets (bytes)
+  data[1] = wheelRevolutionsCount & 0xFF;
+  data[2] = (wheelRevolutionsCount >> 8) & 0xFF;
+  data[3] = (wheelRevolutionsCount >> 16) & 0xFF;
+  data[4] = (wheelRevolutionsCount >> 24) & 0xFF;
+  data[5] = wheelRevolutionsTime & 0xFF;
+  data[6] = (wheelRevolutionsTime >> 8) & 0xFF;
 
   buffer = ble_hs_mbuf_from_flat(data, sizeof(data));
   returnCode = ble_gatts_notify_custom(connectionHandle, attributeHandle, buffer);
