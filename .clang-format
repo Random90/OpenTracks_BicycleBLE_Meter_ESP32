@@ -1,2 +1,3 @@
+C_Cpp.clang_format_fallbackStyle": "{ BasedOnStyle: LLVM}"
 SortIncludes: false
-ColumnLimit: 90
+ColumnLimit: 120

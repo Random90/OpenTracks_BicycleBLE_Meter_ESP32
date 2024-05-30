@@ -1,9 +1,12 @@
 #include <stdio.h>
 
 #include "driver/gpio.h"
+#include "esp_event_base.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 // ble
@@ -18,8 +21,13 @@
 static const char *TAG = "OBDS Main";
 static const char *deviceName = "OBDS_Meter_v0.1";
 
+// will ignore reed events for this time after last event to filter out bouncing/noise
+#define REED_BOUNCE_MS 15
+#define ESP_INTR_FLAG_DEFAULT 0
 #define BLINK_GPIO 10
+#define REED_GPIO 7
 
+QueueHandle_t reedEventQueue = NULL;
 static uint32_t wheelRevolutionsCount = 0;
 static uint16_t wheelRevolutionsTime = 0;
 static uint8_t ledState = 0;
@@ -41,8 +49,7 @@ void printAddress(const void *addr) {
   const uint8_t *u8p;
 
   u8p = addr;
-  MODLOG_DFLT(INFO, "%02x:%02x:%02x:%02x:%02x:%02x", u8p[5], u8p[4], u8p[3], u8p[2],
-              u8p[1], u8p[0]);
+  MODLOG_DFLT(INFO, "%02x:%02x:%02x:%02x:%02x:%02x", u8p[5], u8p[4], u8p[3], u8p[2], u8p[1], u8p[0]);
 }
 
 static void bleAdvertise() {
@@ -87,8 +94,7 @@ static void bleAdvertise() {
   memset(&advertisementParameters, 0, sizeof(advertisementParameters));
   advertisementParameters.conn_mode = BLE_GAP_CONN_MODE_UND;
   advertisementParameters.disc_mode = BLE_GAP_DISC_MODE_GEN;
-  returnCode = ble_gap_adv_start(bleAddrType, NULL, BLE_HS_FOREVER,
-                                 &advertisementParameters, bleGapEvent, NULL);
+  returnCode = ble_gap_adv_start(bleAddrType, NULL, BLE_HS_FOREVER, &advertisementParameters, bleGapEvent, NULL);
   if (returnCode != 0) {
     MODLOG_DFLT(ERROR, "error enabling advertisement; rc=%d\n", returnCode);
     return;
@@ -113,8 +119,7 @@ static int bleGapEvent(struct ble_gap_event *event, void *arg) {
   switch (event->type) {
   case BLE_GAP_EVENT_CONNECT:
     /* A new connection was established or a connection attempt failed */
-    MODLOG_DFLT(INFO, "connection %s; status=%d\n",
-                event->connect.status == 0 ? "established" : "failed",
+    MODLOG_DFLT(INFO, "connection %s; status=%d\n", event->connect.status == 0 ? "established" : "failed",
                 event->connect.status);
 
     if (event->connect.status != 0) {
@@ -148,13 +153,11 @@ static int bleGapEvent(struct ble_gap_event *event, void *arg) {
       notificationStatus = event->subscribe.cur_notify;
       bleStop();
     }
-    ESP_LOGI("BLE_GAP_SUBSCRIBE_EVENT", "conn_handle from subscribe=%d",
-             connectionHandle);
+    ESP_LOGI("BLE_GAP_SUBSCRIBE_EVENT", "conn_handle from subscribe=%d", connectionHandle);
     break;
 
   case BLE_GAP_EVENT_MTU:
-    MODLOG_DFLT(INFO, "mtu update event; conn_handle=%d mtu=%d\n", event->mtu.conn_handle,
-                event->mtu.value);
+    MODLOG_DFLT(INFO, "mtu update event; conn_handle=%d mtu=%d\n", event->mtu.conn_handle, event->mtu.value);
     break;
   }
 
@@ -178,16 +181,16 @@ static void bleOnSync(void) {
   bleAdvertise();
 }
 
-static void onReset(int reason) {
-  MODLOG_DFLT(ERROR, "Resetting state; reason=%d\n", reason);
-}
+static void onReset(int reason) { MODLOG_DFLT(ERROR, "Resetting state; reason=%d\n", reason); }
 
-/* TODO prepare real data */
+/* TODO send 0 after some time to reset indicator on the app? */
 static void bleNotify(TimerHandle_t ev) {
   /* [wheelRevolutionsCount (UINT32), wheelRevolutionsTime (UINT16; 1/1024s) */
   static uint8_t data[7];
   int returnCode;
   struct os_mbuf *buffer;
+  uint32_t wheelRevolutionsCountToSend = wheelRevolutionsCount;
+  uint16_t wheelRevolutionsTimeToSend = wheelRevolutionsTime;
 
   if (!notificationStatus) {
     bleStop();
@@ -196,21 +199,14 @@ static void bleNotify(TimerHandle_t ev) {
     return;
   }
 
-  data[0] = wheelRevolutionsCount;
-  data[1] = wheelRevolutionsTime;
-
-  wheelRevolutionsCount++;
-  wheelRevolutionsTime += 1024; // increment by 1s
-
-  data[0] =
-      0x01; // Flags: wheel revolution data present, crank revolution data not present
+  data[0] = 0x01; // Flags: wheel revolution data present, crank revolution data not present
   // divide 32bit revolutions count into 4 octets (bytes)
-  data[1] = wheelRevolutionsCount & 0xFF;
-  data[2] = (wheelRevolutionsCount >> 8) & 0xFF;
-  data[3] = (wheelRevolutionsCount >> 16) & 0xFF;
-  data[4] = (wheelRevolutionsCount >> 24) & 0xFF;
-  data[5] = wheelRevolutionsTime & 0xFF;
-  data[6] = (wheelRevolutionsTime >> 8) & 0xFF;
+  data[1] = wheelRevolutionsCountToSend & 0xFF;
+  data[2] = (wheelRevolutionsCountToSend >> 8) & 0xFF;
+  data[3] = (wheelRevolutionsCountToSend >> 16) & 0xFF;
+  data[4] = (wheelRevolutionsCountToSend >> 24) & 0xFF;
+  data[5] = wheelRevolutionsTimeToSend & 0xFF;
+  data[6] = (wheelRevolutionsTimeToSend >> 8) & 0xFF;
 
   buffer = ble_hs_mbuf_from_flat(data, sizeof(data));
   returnCode = ble_gatts_notify_custom(connectionHandle, attributeHandle, buffer);
@@ -233,8 +229,7 @@ static void initBle() {
   /* Initialize NVS — it is used to store PHY calibration data */
   esp_err_t resultError = nvs_flash_init();
 
-  if (resultError == ESP_ERR_NVS_NO_FREE_PAGES ||
-      resultError == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+  if (resultError == ESP_ERR_NVS_NO_FREE_PAGES || resultError == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());
     resultError = nvs_flash_init();
   }
@@ -250,9 +245,9 @@ static void initBle() {
   ble_hs_cfg.sync_cb = bleOnSync;
   ble_hs_cfg.reset_cb = onReset;
 
+  // TODO send only when there is a change in the value
   /* name, period/time,  auto reload, timer ID, callback */
-  bleTxTimer =
-      xTimerCreate("bleNotifyTimer", pdMS_TO_TICKS(1000), pdTRUE, (void *)0, bleNotify);
+  bleTxTimer = xTimerCreate("bleNotifyTimer", pdMS_TO_TICKS(1000), pdTRUE, (void *)0, bleNotify);
 
   returnCode = initializeGattServer();
   assert(returnCode == 0);
@@ -271,9 +266,62 @@ static void startBlinkLoop() {
   }
 }
 
+static void reedISR(void *arg) {
+  static TickType_t prevReedTickCount = 0;
+  BaseType_t higherPriorityTaskWoken = pdFALSE;
+  TickType_t reedTickCount = xTaskGetTickCountFromISR();
+
+  if (reedTickCount - prevReedTickCount > pdMS_TO_TICKS(REED_BOUNCE_MS)) {
+    prevReedTickCount = reedTickCount;
+    xQueueSendFromISR(reedEventQueue, &reedTickCount, &higherPriorityTaskWoken);
+  }
+
+  if (higherPriorityTaskWoken) {
+    portYIELD_FROM_ISR();
+  }
+}
+
+static void attachInterrupts() {
+  ESP_LOGI(TAG, "Attaching reed switch interrupt");
+  // create queue for the reed interrupt
+  reedEventQueue = xQueueCreate(10, sizeof(uint32_t));
+
+  // configure reed switch gpio
+  gpio_config_t io_conf;
+  io_conf.mode = GPIO_MODE_INPUT;
+  // bit mask of the pins that you want to set,e.g.GPIO18/19
+  io_conf.pin_bit_mask = 1ULL << REED_GPIO;
+  io_conf.pull_up_en = 1;
+  io_conf.pull_down_en = 0;
+  io_conf.intr_type = GPIO_INTR_NEGEDGE;
+  // configure GPIO with the given settings
+  gpio_config(&io_conf);
+  // gpio_set_intr_type(REED_IO_NUM, GPIO_INTR_NEGEDGE);
+  gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
+  gpio_isr_handler_add(REED_GPIO, reedISR, NULL);
+}
+
+static void reedTask(void *arg) {
+  TickType_t previousReedTickCount = 0;
+  TickType_t reedTickCount;
+  uint32_t msBetweenRotationTicks = 0;
+
+  while (1) {
+    if (xQueueReceive(reedEventQueue, &reedTickCount, portMAX_DELAY)) {
+      msBetweenRotationTicks = ((int)reedTickCount - (int)previousReedTickCount) * (int)portTICK_PERIOD_MS;
+      previousReedTickCount = reedTickCount;
+      wheelRevolutionsCount++;
+      wheelRevolutionsTime += (uint16_t)((msBetweenRotationTicks / 1000.0) * 1024);
+      ESP_LOGI(TAG, "REED ITTR. tick count %lu, msBetween %lu", reedTickCount, msBetweenRotationTicks);
+    }
+  }
+}
+
 void app_main(void) {
   configureLed();
   // TODO as a task or use led in different place
   // startBlinkLoop();
+  attachInterrupts();
+  xTaskCreate(&reedTask, "reedTask", 2048, NULL, 6, NULL);
   initBle();
 }
