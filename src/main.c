@@ -19,10 +19,12 @@
 #include "ble_device.h"
 
 static const char *TAG = "OBDS Main";
-static const char *deviceName = "OBDS_Meter_v0.1";
+static const char *deviceName = "OBDS_Meter";
 
+#define NOTIFY_INTERVAL 1000
 // will ignore reed events for this time after last event to filter out bouncing/noise
 #define REED_BOUNCE_MS 15
+
 #define ESP_INTR_FLAG_DEFAULT 0
 #define BLINK_GPIO 10
 #define REED_GPIO 7
@@ -183,14 +185,13 @@ static void bleOnSync(void) {
 
 static void onReset(int reason) { MODLOG_DFLT(ERROR, "Resetting state; reason=%d\n", reason); }
 
-/* TODO send 0 after some time to reset indicator on the app? */
 static void bleNotify(TimerHandle_t ev) {
   /* [wheelRevolutionsCount (UINT32), wheelRevolutionsTime (UINT16; 1/1024s) */
   static uint8_t data[7];
   int returnCode;
   struct os_mbuf *buffer;
-  uint32_t wheelRevolutionsCountToSend = wheelRevolutionsCount;
-  uint16_t wheelRevolutionsTimeToSend = wheelRevolutionsTime;
+  static uint32_t wheelRevolutionsCountToSend;
+  static uint16_t wheelRevolutionsTimeToSend;
 
   if (!notificationStatus) {
     bleStop();
@@ -198,6 +199,14 @@ static void bleNotify(TimerHandle_t ev) {
     wheelRevolutionsTime = 0;
     return;
   }
+
+  // prevent sending same data multiple times. Note that timer is still running.
+  if (wheelRevolutionsCountToSend == wheelRevolutionsCount) {
+    return;
+  }
+
+  wheelRevolutionsCountToSend = wheelRevolutionsCount;
+  wheelRevolutionsTimeToSend = wheelRevolutionsTime;
 
   data[0] = 0x01; // Flags: wheel revolution data present, crank revolution data not present
   // divide 32bit revolutions count into 4 octets (bytes)
@@ -245,9 +254,8 @@ static void initBle() {
   ble_hs_cfg.sync_cb = bleOnSync;
   ble_hs_cfg.reset_cb = onReset;
 
-  // TODO send only when there is a change in the value
   /* name, period/time,  auto reload, timer ID, callback */
-  bleTxTimer = xTimerCreate("bleNotifyTimer", pdMS_TO_TICKS(1000), pdTRUE, (void *)0, bleNotify);
+  bleTxTimer = xTimerCreate("bleNotifyTimer", pdMS_TO_TICKS(NOTIFY_INTERVAL), pdTRUE, (void *)0, bleNotify);
 
   returnCode = initializeGattServer();
   assert(returnCode == 0);
