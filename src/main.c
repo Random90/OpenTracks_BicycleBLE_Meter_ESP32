@@ -9,6 +9,7 @@
 #include "freertos/queue.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "esp_sleep.h"
 // ble
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -21,13 +22,14 @@
 static const char *TAG = "OBDS Main";
 static const char *deviceName = "OBDS_Meter";
 
-#define NOTIFY_INTERVAL 1000
+#define DEEP_SLEEP_INTERVAL_MS 60000 // 1 minute
+#define NOTIFY_INTERVAL_MS 1000
 // will ignore reed events for this time after last event to filter out bouncing/noise
 #define REED_BOUNCE_MS 15
 
 #define ESP_INTR_FLAG_DEFAULT 0
 #define BLINK_GPIO 10
-#define REED_GPIO 7
+#define REED_GPIO 2
 
 QueueHandle_t reedEventQueue = NULL;
 static uint32_t wheelRevolutionsCount = 0;
@@ -37,6 +39,7 @@ static bool notificationStatus;
 
 static uint8_t bleAddrType;
 static TimerHandle_t bleTxTimer;
+static TimerHandle_t deepSleepTimer;
 static uint16_t connectionHandle;
 static int bleGapEvent(struct ble_gap_event *event, void *arg);
 
@@ -103,20 +106,6 @@ static void bleAdvertise() {
   }
 }
 
-static void bleStop(void) { xTimerStop(bleTxTimer, 1000 / portTICK_PERIOD_MS); }
-
-static void bleReset(void) {
-  int returnNode;
-
-  if (xTimerReset(bleTxTimer, 1000 / portTICK_PERIOD_MS) == pdPASS) {
-    returnNode = 0;
-  } else {
-    returnNode = 1;
-  }
-
-  assert(returnNode == 0);
-}
-
 static int bleGapEvent(struct ble_gap_event *event, void *arg) {
   switch (event->type) {
   case BLE_GAP_EVENT_CONNECT:
@@ -135,6 +124,11 @@ static int bleGapEvent(struct ble_gap_event *event, void *arg) {
     MODLOG_DFLT(INFO, "disconnect; reason=%d\n", event->disconnect.reason);
     /* Connection terminated; resume advertising */
     bleAdvertise();
+
+    if (xTimerIsTimerActive(deepSleepTimer) == pdFALSE) {
+      ESP_LOGI(TAG, "Restarting deep sleep timer");
+      xTimerStart(deepSleepTimer, 1000 / portTICK_PERIOD_MS);
+    }
     break;
 
   case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -150,10 +144,10 @@ static int bleGapEvent(struct ble_gap_event *event, void *arg) {
 
     if (event->subscribe.attr_handle == attributeHandle) {
       notificationStatus = event->subscribe.cur_notify;
-      bleReset();
+      xTimerReset(bleTxTimer, 1000 / portTICK_PERIOD_MS);
     } else if (event->subscribe.attr_handle != attributeHandle) {
       notificationStatus = event->subscribe.cur_notify;
-      bleStop();
+      xTimerStop(bleTxTimer, 1000 / portTICK_PERIOD_MS);
     }
     ESP_LOGI("BLE_GAP_SUBSCRIBE_EVENT", "conn_handle from subscribe=%d", connectionHandle);
     break;
@@ -185,7 +179,7 @@ static void bleOnSync(void) {
 
 static void onReset(int reason) { MODLOG_DFLT(ERROR, "Resetting state; reason=%d\n", reason); }
 
-static void bleNotify(TimerHandle_t ev) {
+static void bleNotifyTimerCb(TimerHandle_t ev) {
   /* [wheelRevolutionsCount (UINT32), wheelRevolutionsTime (UINT16; 1/1024s) */
   static uint8_t data[7];
   int returnCode;
@@ -193,15 +187,20 @@ static void bleNotify(TimerHandle_t ev) {
   static uint32_t wheelRevolutionsCountToSend;
   static uint16_t wheelRevolutionsTimeToSend;
 
-  if (!notificationStatus) {
-    bleStop();
-    wheelRevolutionsCount = 0;
-    wheelRevolutionsTime = 0;
+  // prevent sending same data multiple times. Note that timer is still running.
+  // TODO stop the notify timer, reset on interrupt
+  if (wheelRevolutionsCountToSend == wheelRevolutionsCount) {
+    if (xTimerIsTimerActive(deepSleepTimer) == pdFALSE) {
+      ESP_LOGI(TAG, "Restarting deep sleep timer");
+      xTimerStart(deepSleepTimer, 1000 / portTICK_PERIOD_MS);
+    }
     return;
   }
 
-  // prevent sending same data multiple times. Note that timer is still running.
-  if (wheelRevolutionsCountToSend == wheelRevolutionsCount) {
+  if (!notificationStatus) {
+    xTimerStop(bleTxTimer, 1000 / portTICK_PERIOD_MS);
+    wheelRevolutionsCount = 0;
+    wheelRevolutionsTime = 0;
     return;
   }
 
@@ -222,7 +221,7 @@ static void bleNotify(TimerHandle_t ev) {
 
   assert(returnCode == 0);
 
-  bleReset();
+  xTimerReset(bleTxTimer, 1000 / portTICK_PERIOD_MS);
 }
 
 void bleHostTask(void *param) {
@@ -255,7 +254,7 @@ static void initBle() {
   ble_hs_cfg.reset_cb = onReset;
 
   /* name, period/time,  auto reload, timer ID, callback */
-  bleTxTimer = xTimerCreate("bleNotifyTimer", pdMS_TO_TICKS(NOTIFY_INTERVAL), pdTRUE, (void *)0, bleNotify);
+  bleTxTimer = xTimerCreate("bleNotifyTimer", pdMS_TO_TICKS(NOTIFY_INTERVAL_MS), pdTRUE, (void *)0, bleNotifyTimerCb);
 
   returnCode = initializeGattServer();
   assert(returnCode == 0);
@@ -297,14 +296,12 @@ static void attachInterrupts() {
   // configure reed switch gpio
   gpio_config_t io_conf;
   io_conf.mode = GPIO_MODE_INPUT;
-  // bit mask of the pins that you want to set,e.g.GPIO18/19
   io_conf.pin_bit_mask = 1ULL << REED_GPIO;
   io_conf.pull_up_en = 1;
   io_conf.pull_down_en = 0;
   io_conf.intr_type = GPIO_INTR_NEGEDGE;
   // configure GPIO with the given settings
   gpio_config(&io_conf);
-  // gpio_set_intr_type(REED_IO_NUM, GPIO_INTR_NEGEDGE);
   gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
   gpio_isr_handler_add(REED_GPIO, reedISR, NULL);
 }
@@ -316,6 +313,11 @@ static void reedTask(void *arg) {
 
   while (1) {
     if (xQueueReceive(reedEventQueue, &reedTickCount, portMAX_DELAY)) {
+      // ignore DP timer abort if no BT connection is established
+      if (xTimerIsTimerActive(deepSleepTimer) == pdTRUE && notificationStatus) {
+        ESP_LOGI(TAG, "Deep sleep timer aborted");
+        xTimerStop(deepSleepTimer, 1000 / portTICK_PERIOD_MS);
+      }
       msBetweenRotationTicks = ((int)reedTickCount - (int)previousReedTickCount) * (int)portTICK_PERIOD_MS;
       previousReedTickCount = reedTickCount;
       wheelRevolutionsCount++;
@@ -325,6 +327,20 @@ static void reedTask(void *arg) {
   }
 }
 
+static void deepSleepTimerCb(TimerHandle_t xTimer) {
+  int returnCode;
+
+  ESP_LOGI(TAG, "Entering deep sleep!");
+  ble_gap_adv_stop();
+  nimble_port_stop();
+  nimble_port_deinit();
+
+  uint64_t gpio_pin_mask = 1ULL << REED_GPIO;
+  returnCode = esp_deep_sleep_enable_gpio_wakeup(gpio_pin_mask, ESP_GPIO_WAKEUP_GPIO_LOW);
+  ESP_LOGI(TAG, "Deep sleep enable return code %d", returnCode);
+  esp_deep_sleep_start();
+}
+
 void app_main(void) {
   configureLed();
   // TODO as a task or use led in different place
@@ -332,4 +348,7 @@ void app_main(void) {
   attachInterrupts();
   xTaskCreate(&reedTask, "reedTask", 2048, NULL, 6, NULL);
   initBle();
+  deepSleepTimer =
+      xTimerCreate("deepSleepTimer", pdMS_TO_TICKS(DEEP_SLEEP_INTERVAL_MS), pdFALSE, (void *)0, deepSleepTimerCb);
+  xTimerStart(deepSleepTimer, 1000 / portTICK_PERIOD_MS);
 }
