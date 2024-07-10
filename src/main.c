@@ -35,7 +35,7 @@ QueueHandle_t reedEventQueue = NULL;
 static uint32_t wheelRevolutionsCount = 0;
 static uint16_t wheelRevolutionsTime = 0;
 static uint8_t ledState = 0;
-static bool notificationStatus;
+static bool notifySubscribed;
 
 static uint8_t bleAddrType;
 static TimerHandle_t bleTxTimer;
@@ -143,10 +143,10 @@ static int bleGapEvent(struct ble_gap_event *event, void *arg) {
                 event->subscribe.cur_notify, attributeHandle);
 
     if (event->subscribe.attr_handle == attributeHandle) {
-      notificationStatus = event->subscribe.cur_notify;
+      notifySubscribed = event->subscribe.cur_notify;
       xTimerReset(bleTxTimer, 1000 / portTICK_PERIOD_MS);
     } else if (event->subscribe.attr_handle != attributeHandle) {
-      notificationStatus = event->subscribe.cur_notify;
+      notifySubscribed = event->subscribe.cur_notify;
       xTimerStop(bleTxTimer, 1000 / portTICK_PERIOD_MS);
     }
     ESP_LOGI("BLE_GAP_SUBSCRIBE_EVENT", "conn_handle from subscribe=%d", connectionHandle);
@@ -187,17 +187,25 @@ static void bleNotifyTimerCb(TimerHandle_t ev) {
   static uint32_t wheelRevolutionsCountToSend;
   static uint16_t wheelRevolutionsTimeToSend;
 
-  // prevent sending same data multiple times. Note that timer is still running.
-  // TODO stop the notify timer, reset on interrupt
+  ESP_LOGI(TAG, "BLE Notify Timer Callback");
+
+  // prevent sending same data multiple times.
   if (wheelRevolutionsCountToSend == wheelRevolutionsCount) {
     if (xTimerIsTimerActive(deepSleepTimer) == pdFALSE) {
       ESP_LOGI(TAG, "Restarting deep sleep timer");
       xTimerStart(deepSleepTimer, 1000 / portTICK_PERIOD_MS);
     }
+
+    if (xTimerIsTimerActive(bleTxTimer) == pdTRUE) {
+      xTimerStop(bleTxTimer, 1000 / portTICK_PERIOD_MS);
+    } else {
+      ESP_LOGW(TAG, "[NOTIFY] Timer already stopped");
+    }
+
     return;
   }
 
-  if (!notificationStatus) {
+  if (!notifySubscribed) {
     xTimerStop(bleTxTimer, 1000 / portTICK_PERIOD_MS);
     wheelRevolutionsCount = 0;
     wheelRevolutionsTime = 0;
@@ -307,6 +315,7 @@ static void attachInterrupts() {
 }
 
 static void reedTask(void *arg) {
+  int returnCode;
   TickType_t previousReedTickCount = 0;
   TickType_t reedTickCount;
   uint32_t msBetweenRotationTicks = 0;
@@ -314,10 +323,16 @@ static void reedTask(void *arg) {
   while (1) {
     if (xQueueReceive(reedEventQueue, &reedTickCount, portMAX_DELAY)) {
       // ignore DP timer abort if no BT connection is established
-      if (xTimerIsTimerActive(deepSleepTimer) == pdTRUE && notificationStatus) {
+      if (xTimerIsTimerActive(deepSleepTimer) == pdTRUE && notifySubscribed) {
         ESP_LOGI(TAG, "Deep sleep timer aborted");
         xTimerStop(deepSleepTimer, 1000 / portTICK_PERIOD_MS);
       }
+
+      if (xTimerIsTimerActive(bleTxTimer) == pdFALSE) {
+        returnCode = xTimerStart(bleTxTimer, 1000 / portTICK_PERIOD_MS);
+        assert(returnCode == pdPASS);
+      }
+
       msBetweenRotationTicks = ((int)reedTickCount - (int)previousReedTickCount) * (int)portTICK_PERIOD_MS;
       previousReedTickCount = reedTickCount;
       wheelRevolutionsCount++;
