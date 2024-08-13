@@ -18,6 +18,7 @@
 #include "console/console.h"
 #include "services/gap/ble_svc_gap.h"
 #include "ble_device.h"
+#include "esp_bt.h"
 
 static const char *TAG = "OBDS Main";
 static const char *deviceName = "OBDS_Meter";
@@ -104,16 +105,29 @@ static void bleAdvertise() {
     MODLOG_DFLT(ERROR, "error enabling advertisement; rc=%d\n", returnCode);
     return;
   }
+
+  ESP_LOGI(TAG, "Setting adv TX power level to -12dBm");
+  returnCode = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_N12);
+  if (returnCode != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set TX power level %d", returnCode);
+  }
 }
 
 static int bleGapEvent(struct ble_gap_event *event, void *arg) {
+  esp_err_t returnCode;
   switch (event->type) {
   case BLE_GAP_EVENT_CONNECT:
     /* A new connection was established or a connection attempt failed */
     MODLOG_DFLT(INFO, "connection %s; status=%d\n", event->connect.status == 0 ? "established" : "failed",
                 event->connect.status);
 
-    if (event->connect.status != 0) {
+    if (event->connect.status == 0) {
+      ESP_LOGI(TAG, "Setting default TX power level to -24dBm");
+      returnCode = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_N24);
+      if (returnCode != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set TX power level %d", returnCode);
+      }
+    } else {
       /* Connection failed; resume advertising */
       bleAdvertise();
     }
@@ -346,6 +360,7 @@ static void deepSleepTimerCb(TimerHandle_t xTimer) {
   int returnCode;
 
   ESP_LOGI(TAG, "Entering deep sleep!");
+
   ble_gap_adv_stop();
   nimble_port_stop();
   nimble_port_deinit();
